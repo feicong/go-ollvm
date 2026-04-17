@@ -1,7 +1,7 @@
 # Copyright (c) 2025-2026 fei_cong(https://github.com/feicong/feicong-course)
 
 name: ci
-run-name: Build gollvm for ${{ inputs.llvm_ref || 'main' }}
+run-name: Build gollvm for ${{ inputs.llvm_source || 'llvm-project/release/20.x' }}
 
 on:
   push:
@@ -16,31 +16,25 @@ on:
       - '**.md'
   workflow_dispatch:
     inputs:
-      llvm_ref:
-        description: LLVM branch to build
+      llvm_source:
+        description: LLVM source to build
         required: false
-        default: main
+        default: llvm-project/release/20.x
         type: choice
         options:
-          - main
-          - release/22.x
-          - release/21.x
-          - release/20.x
-          - release/19.x
-          - release/18.x
-          - release/17.x
-          - release/16.x
+          - llvm-project/release/20.x
+          - Arkari/llvm-20.x
 
 permissions:
   contents: write
 
 concurrency:
-  group: ci-${{ github.ref }}-${{ inputs.llvm_ref || 'main' }}
+  group: ci-${{ github.ref }}-${{ inputs.llvm_source || 'llvm-project/release/20.x' }}
   cancel-in-progress: true
 
 env:
   LLVM_REPO: https://github.com/llvm/llvm-project.git
-  LLVM_REF: ${{ inputs.llvm_ref || 'main' }}
+  ARKARI_LLVM_REPO: https://github.com/komimoe/Arkari.git
   GOLLVM_REPO: https://go.googlesource.com/gollvm
   GOFRONTEND_REPO: https://go.googlesource.com/gofrontend
   LIBFFI_REPO: https://github.com/libffi/libffi.git
@@ -49,7 +43,7 @@ env:
 
 jobs:
   build:
-    name: Build gollvm for ${{ inputs.llvm_ref || 'main' }}
+    name: Build gollvm for ${{ inputs.llvm_source || 'llvm-project/release/20.x' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     steps:
@@ -59,13 +53,34 @@ jobs:
       - name: Prepare metadata
         run: |
           set -euxo pipefail
-          llvm_ref_safe="${LLVM_REF//\//-}"
-          archive_name="gollvm-toolchain-linux-x86_64-${llvm_ref_safe}.tar.xz"
-          release_tag="gollvm-toolchain-${llvm_ref_safe}"
-          release_name="gollvm toolchain (${LLVM_REF})"
+          llvm_source="${{ inputs.llvm_source || 'llvm-project/release/20.x' }}"
+          case "${llvm_source}" in
+            "llvm-project/release/20.x")
+              selected_llvm_repo="${LLVM_REPO}"
+              selected_llvm_ref="release/20.x"
+              selected_llvm_label="llvm-project-release-20.x"
+              ;;
+            "Arkari/llvm-20.x")
+              selected_llvm_repo="${ARKARI_LLVM_REPO}"
+              selected_llvm_ref="llvm-20.x"
+              selected_llvm_label="Arkari-llvm-20.x"
+              ;;
+            *)
+              echo "Unsupported LLVM source: ${llvm_source}" >&2
+              exit 1
+              ;;
+          esac
+          archive_name="gollvm-toolchain-linux-x86_64-${selected_llvm_label}.tar.xz"
+          source_archive_name="gollvm-source-${selected_llvm_label}.tar.xz"
+          release_tag="gollvm-toolchain-${selected_llvm_label}"
+          release_name="gollvm toolchain (${llvm_source})"
           {
-            echo "LLVM_REF_SAFE=${llvm_ref_safe}"
+            echo "LLVM_SOURCE=${llvm_source}"
+            echo "SELECTED_LLVM_REPO=${selected_llvm_repo}"
+            echo "SELECTED_LLVM_REF=${selected_llvm_ref}"
+            echo "SELECTED_LLVM_LABEL=${selected_llvm_label}"
             echo "ARCHIVE_NAME=${archive_name}"
+            echo "SOURCE_ARCHIVE_NAME=${source_archive_name}"
             echo "RELEASE_TAG=${release_tag}"
             echo "RELEASE_NAME=${release_name}"
           } >> "${GITHUB_ENV}"
@@ -100,7 +115,7 @@ jobs:
         run: |
           set -euxo pipefail
           mkdir -p "${WORKAREA}"
-          git clone --depth 1 --branch "${LLVM_REF}" --single-branch "${LLVM_REPO}" "${LLVM_SRC_DIR}"
+          git clone --depth 1 --branch "${SELECTED_LLVM_REF}" --single-branch "${SELECTED_LLVM_REPO}" "${LLVM_SRC_DIR}"
           git clone --depth 1 "${GOLLVM_REPO}" "${GOLLVM_SRC_DIR}"
           git clone --depth 1 "${GOFRONTEND_REPO}" "${GOLLVM_SRC_DIR}/gofrontend"
           git clone --depth 1 "${LIBFFI_REPO}" "${GOLLVM_SRC_DIR}/libgo/libffi"
@@ -153,11 +168,20 @@ jobs:
           set -euxo pipefail
           tar -C "${INSTALL_DIR}" -caf "${GITHUB_WORKSPACE}/${ARCHIVE_NAME}" .
 
+      - name: Archive source tree
+        env:
+          LLVM_SRC_DIR: ${{ env.WORKAREA }}/llvm-project
+        run: |
+          set -euxo pipefail
+          tar --exclude-vcs -C "${WORKAREA}" -caf "${GITHUB_WORKSPACE}/${SOURCE_ARCHIVE_NAME}" "$(basename "${LLVM_SRC_DIR}")"
+
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
           name: ${{ env.RELEASE_TAG }}
-          path: ${{ github.workspace }}/${{ env.ARCHIVE_NAME }}
+          path: |
+            ${{ github.workspace }}/${{ env.ARCHIVE_NAME }}
+            ${{ github.workspace }}/${{ env.SOURCE_ARCHIVE_NAME }}
           if-no-files-found: error
 
       - name: Create release
@@ -166,12 +190,14 @@ jobs:
         with:
           allowUpdates: true
           artifactErrorsFailBuild: true
-          artifacts: ${{ github.workspace }}/${{ env.ARCHIVE_NAME }}
+          artifacts: ${{ github.workspace }}/${{ env.ARCHIVE_NAME }},${{ github.workspace }}/${{ env.SOURCE_ARCHIVE_NAME }}
           body: |
-            LLVM ref: `${{ env.LLVM_REF }}`
+            LLVM source: `${{ env.LLVM_SOURCE }}`
+            LLVM repo: `${{ env.SELECTED_LLVM_REPO }}`
+            LLVM ref: `${{ env.SELECTED_LLVM_REF }}`
             Gollvm repo: `${{ env.GOLLVM_REPO }}`
             Workflow run: `${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}`
           name: ${{ env.RELEASE_NAME }}
-          prerelease: true
+          prerelease: false
           replacesArtifacts: true
           tag: ${{ env.RELEASE_TAG }}
