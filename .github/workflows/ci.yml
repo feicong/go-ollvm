@@ -1,6 +1,7 @@
 # Copyright (c) 2025-2026 fei_cong(https://github.com/feicong/feicong-course)
 
 name: ci
+run-name: Build gollvm for ${{ inputs.llvm_ref || 'main' }}
 
 on:
   push:
@@ -14,32 +15,60 @@ on:
       - 'LICENSE'
       - '**.md'
   workflow_dispatch:
+    inputs:
+      llvm_ref:
+        description: LLVM branch to build
+        required: false
+        default: main
+        type: choice
+        options:
+          - main
+          - release/22.x
+          - release/21.x
+          - release/20.x
+          - release/19.x
+          - release/18.x
+          - release/17.x
+          - release/16.x
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.ref }}-${{ inputs.llvm_ref || 'main' }}
   cancel-in-progress: true
 
 env:
   LLVM_REPO: https://github.com/llvm/llvm-project.git
+  LLVM_REF: ${{ inputs.llvm_ref || 'main' }}
+  GOLLVM_REPO: https://go.googlesource.com/gollvm
   GOFRONTEND_REPO: https://go.googlesource.com/gofrontend
   LIBFFI_REPO: https://github.com/libffi/libffi.git
   LIBBACKTRACE_REPO: https://github.com/ianlancetaylor/libbacktrace.git
   WORKAREA: ${{ github.workspace }}/workarea
-  REPO_DIR: ${{ github.workspace }}/repo
 
 jobs:
   build:
-    name: build-linux-toolchain
+    name: Build gollvm for ${{ inputs.llvm_ref || 'main' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     steps:
       - name: Checkout
         uses: actions/checkout@v6
-        with:
-          path: repo
+
+      - name: Prepare metadata
+        run: |
+          set -euxo pipefail
+          llvm_ref_safe="${LLVM_REF//\//-}"
+          archive_name="gollvm-toolchain-linux-x86_64-${llvm_ref_safe}.tar.xz"
+          release_tag="gollvm-toolchain-${llvm_ref_safe}"
+          release_name="gollvm toolchain (${LLVM_REF})"
+          {
+            echo "LLVM_REF_SAFE=${llvm_ref_safe}"
+            echo "ARCHIVE_NAME=${archive_name}"
+            echo "RELEASE_TAG=${release_tag}"
+            echo "RELEASE_NAME=${release_name}"
+          } >> "${GITHUB_ENV}"
 
       - name: Install dependencies
         run: |
@@ -71,9 +100,8 @@ jobs:
         run: |
           set -euxo pipefail
           mkdir -p "${WORKAREA}"
-          git clone --depth 1 "${LLVM_REPO}" "${LLVM_SRC_DIR}"
-          mkdir -p "${GOLLVM_SRC_DIR}"
-          rsync -a --delete --exclude '.git' "${REPO_DIR}/" "${GOLLVM_SRC_DIR}/"
+          git clone --depth 1 --branch "${LLVM_REF}" --single-branch "${LLVM_REPO}" "${LLVM_SRC_DIR}"
+          git clone --depth 1 "${GOLLVM_REPO}" "${GOLLVM_SRC_DIR}"
           git clone --depth 1 "${GOFRONTEND_REPO}" "${GOLLVM_SRC_DIR}/gofrontend"
           git clone --depth 1 "${LIBFFI_REPO}" "${GOLLVM_SRC_DIR}/libgo/libffi"
           git clone --depth 1 "${LIBBACKTRACE_REPO}" "${GOLLVM_SRC_DIR}/libgo/libbacktrace"
@@ -81,6 +109,7 @@ jobs:
       - name: Configure
         env:
           LLVM_SRC_DIR: ${{ env.WORKAREA }}/llvm-project
+          GOLLVM_SRC_DIR: ${{ env.WORKAREA }}/llvm-project/llvm/tools/gollvm
           BUILD_DIR: ${{ env.WORKAREA }}/build-release
           INSTALL_DIR: ${{ env.WORKAREA }}/install
         run: |
@@ -88,6 +117,8 @@ jobs:
           cmake -S "${LLVM_SRC_DIR}/llvm" -B "${BUILD_DIR}" -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX="${INSTALL_DIR}" \
+            -DLLVM_EXTERNAL_PROJECTS=gollvm \
+            -DLLVM_EXTERNAL_GOLLVM_SOURCE_DIR="${GOLLVM_SRC_DIR}" \
             -DLLVM_BUILD_BENCHMARKS=OFF \
             -DLLVM_BUILD_DOCS=OFF \
             -DLLVM_BUILD_EXAMPLES=OFF \
@@ -120,11 +151,27 @@ jobs:
           INSTALL_DIR: ${{ env.WORKAREA }}/install
         run: |
           set -euxo pipefail
-          tar -C "${INSTALL_DIR}" -caf "${GITHUB_WORKSPACE}/gollvm-toolchain-linux-x86_64.tar.xz" .
+          tar -C "${INSTALL_DIR}" -caf "${GITHUB_WORKSPACE}/${ARCHIVE_NAME}" .
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
-          name: gollvm-toolchain-linux-x86_64
-          path: ${{ github.workspace }}/gollvm-toolchain-linux-x86_64.tar.xz
+          name: ${{ env.RELEASE_TAG }}
+          path: ${{ github.workspace }}/${{ env.ARCHIVE_NAME }}
           if-no-files-found: error
+
+      - name: Create release
+        if: ${{ success() && github.event_name == 'workflow_dispatch' }}
+        uses: ncipollo/release-action@v1
+        with:
+          allowUpdates: true
+          artifactErrorsFailBuild: true
+          artifacts: ${{ github.workspace }}/${{ env.ARCHIVE_NAME }}
+          body: |
+            LLVM ref: `${{ env.LLVM_REF }}`
+            Gollvm repo: `${{ env.GOLLVM_REPO }}`
+            Workflow run: `${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}`
+          name: ${{ env.RELEASE_NAME }}
+          prerelease: true
+          replacesArtifacts: true
+          tag: ${{ env.RELEASE_TAG }}
